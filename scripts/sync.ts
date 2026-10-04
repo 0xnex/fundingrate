@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { HOUR_MS, rankStocks, type FuturesSymbol, type VolumeTicker } from "../src/lib/market";
-import { completedHour, incrementalStart, parseCompletedCandles, parseFundingEvents } from "../src/lib/sync-logic";
+import { completedHour, importOpenInterest, incrementalStart, parseCompletedCandles, parseFundingEvents } from "../src/lib/sync-logic";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const secretKey = process.env.SUPABASE_SECRET_KEY;
@@ -30,21 +30,38 @@ async function getJson<T>(url: string): Promise<T> {
   throw new Error(`Could not fetch ${url}`);
 }
 
-async function upsertBatches(table: "hourly_prices" | "funding_events", rows: Record<string, unknown>[]) {
+async function upsertBatches(table: "hourly_prices" | "funding_events" | "hourly_open_interest", rows: Record<string, unknown>[]) {
   for (let index = 0; index < rows.length; index += 500) {
     const { error } = await db.from(table).upsert(rows.slice(index, index + 500));
     if (error) throw new Error(`${table} upsert: ${error.message}`);
   }
 }
 
-async function latestTimestamp(table: "hourly_prices" | "funding_events", ticker: string, market?: "perp" | "spot") {
-  const field = table === "hourly_prices" ? "bucket_start" : "funding_time";
+async function latestTimestamp(table: "hourly_prices" | "funding_events" | "hourly_open_interest", ticker: string, market?: "perp" | "spot") {
+  const field = table === "funding_events" ? "funding_time" : "bucket_start";
   let query = db.from(table).select(field).eq("ticker", ticker);
   if (market) query = query.eq("market", market);
   const { data, error } = await query.order(field, { ascending: false }).limit(1);
   if (error) throw new Error(`${table} latest: ${error.message}`);
   const record = data?.[0] as Record<string, string> | undefined;
   return record ? Date.parse(record[field]) : null;
+}
+
+async function syncOpenInterest(ticker: string, symbol: string, nowHour: number) {
+  // Recheck Binance's whole available window: an earlier capped page may have
+  // left gaps even when the latest stored hour is current.
+  const firstBucket = nowHour - 30 * 24 * HOUR_MS;
+  return importOpenInterest(firstBucket, nowHour, async (startTime, endTime) => {
+    const url = new URL("/futures/data/openInterestHist", FUTURES);
+    url.searchParams.set("symbol", symbol);
+    url.searchParams.set("period", "1h");
+    url.searchParams.set("startTime", String(startTime));
+    url.searchParams.set("endTime", String(endTime));
+    url.searchParams.set("limit", "500");
+    return getJson<unknown>(url.toString());
+  }, async (rows) => {
+    await upsertBatches("hourly_open_interest", rows.map((row) => ({ ticker, perp_symbol: symbol, ...row })));
+  });
 }
 
 async function syncCandles(ticker: string, symbol: string, market: "perp" | "spot", nowHour: number) {
@@ -120,7 +137,15 @@ async function run() {
         const perpCount = await syncCandles(stock.ticker, stock.perp_symbol, "perp", nowHour);
         const spotCount = stock.spot_symbol ? await syncCandles(stock.ticker, stock.spot_symbol, "spot", nowHour) : 0;
         const fundingCount = await syncFunding(stock.ticker, stock.perp_symbol, nowHour);
-        console.log(`${stock.rank}. ${stock.ticker}: ${perpCount} perp, ${spotCount} spot candles; ${fundingCount} funding events`);
+        let openInterestCount = 0;
+        try {
+          openInterestCount = await syncOpenInterest(stock.ticker, stock.perp_symbol, nowHour);
+        } catch (error) {
+          const message = `${stock.ticker} OI: ${error instanceof Error ? error.message : String(error)}`;
+          errors.push(message);
+          console.error(message);
+        }
+        console.log(`${stock.rank}. ${stock.ticker}: ${perpCount} perp, ${spotCount} spot candles; ${fundingCount} funding events; ${openInterestCount} OI hours`);
       } catch (error) {
         const message = `${stock.ticker}: ${error instanceof Error ? error.message : String(error)}`;
         errors.push(message);
@@ -143,8 +168,8 @@ async function run() {
     if (stockError) throw new Error(`Upsert tracked stocks: ${stockError.message}`);
 
     const cutoff = new Date(nowHour - 90 * 24 * HOUR_MS).toISOString();
-    for (const table of ["hourly_prices", "funding_events"] as const) {
-      const field = table === "hourly_prices" ? "bucket_start" : "funding_time";
+    for (const table of ["hourly_prices", "funding_events", "hourly_open_interest"] as const) {
+      const field = table === "funding_events" ? "funding_time" : "bucket_start";
       const { error } = await db.from(table).delete().lt(field, cutoff);
       if (error) errors.push(`Prune ${table}: ${error.message}`);
     }

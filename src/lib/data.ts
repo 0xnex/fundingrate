@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { DAY_MS } from "./market";
 import type { FundingEvent, HourlyPrice } from "./analytics";
+import type { MarketSnapshot } from "./strategy";
 
 export interface TrackedStock {
   ticker: string;
@@ -28,6 +29,13 @@ type PriceRow = HourlyPrice & {
   low: number;
   volume: number;
 };
+
+export interface OpenInterestRow {
+  ticker: string;
+  bucket_start: string;
+  open_interest: number;
+  open_interest_value: number;
+}
 
 let client: ReturnType<typeof createClient> | null = null;
 function supabase() {
@@ -92,17 +100,45 @@ export async function fetchPrices(ticker: string, through: string, days = 90): P
   }
 }
 
-export async function fetchRecentPrices(tickers: string[], through: string): Promise<HourlyPrice[]> {
+export async function fetchOverviewPrices(tickers: string[], through: string): Promise<HourlyPrice[]> {
   if (tickers.length === 0) return [];
-  const from = new Date(Date.parse(through) - 2 * DAY_MS).toISOString();
-  const rows: HourlyPrice[] = [];
+  const from = new Date(Date.parse(through) - 90 * DAY_MS).toISOString();
+  const groups = Array.from({ length: Math.ceil(tickers.length / 5) }, (_, index) => tickers.slice(index * 5, index * 5 + 5));
+  const pages = await Promise.all(groups.map(async (group) => {
+    const rows: HourlyPrice[] = [];
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase().from("hourly_prices")
+        .select("ticker,market,bucket_start,close")
+        .in("ticker", group).gte("bucket_start", from).lt("bucket_start", through)
+        .order("bucket_start").order("ticker").order("market").range(offset, offset + 999);
+      const page = unwrap(data, error) as HourlyPrice[];
+      rows.push(...page);
+      if (page.length < 1000) return rows;
+    }
+  }));
+  return pages.flat();
+}
+
+export async function fetchOpenInterest(tickers: string[], through: string, days = 90): Promise<OpenInterestRow[]> {
+  if (!tickers.length) return [];
+  const from = new Date(Date.parse(through) - days * DAY_MS).toISOString();
+  const rows: OpenInterestRow[] = [];
   for (let offset = 0; ; offset += 1000) {
-    const { data, error } = await supabase().from("hourly_prices")
-      .select("ticker,market,bucket_start,close")
+    const { data, error } = await supabase().from("hourly_open_interest")
+      .select("ticker,bucket_start,open_interest,open_interest_value")
       .in("ticker", tickers).gte("bucket_start", from).lt("bucket_start", through)
-      .order("bucket_start").order("ticker").order("market").range(offset, offset + 999);
-    const page = unwrap(data, error) as HourlyPrice[];
+      .order("bucket_start").order("ticker").range(offset, offset + 999);
+    const page = unwrap(data, error) as OpenInterestRow[];
     rows.push(...page);
     if (page.length < 1000) return rows;
   }
+}
+
+export async function fetchMarketSnapshots(tickers: string[]): Promise<MarketSnapshot[]> {
+  if (!tickers.length) return [];
+  const response = await fetch(`/api/market?tickers=${encodeURIComponent(tickers.join(","))}`);
+  if (!response.ok) throw new Error(`Live Binance data request failed (${response.status})`);
+  const data = await response.json() as { markets?: MarketSnapshot[] };
+  if (!Array.isArray(data.markets)) throw new Error("Live Binance data is invalid");
+  return data.markets;
 }

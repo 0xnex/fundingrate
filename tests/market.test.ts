@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { alignHourlyPrices, annualizedFundingApy, cumulativeFunding, fundingInWindow, normalizePrices } from "../src/lib/analytics";
+import { rankValues } from "../src/lib/heatmap";
 import { HOUR_MS, rankStocks, type FuturesSymbol } from "../src/lib/market";
 import { completedHour, incrementalStart, parseCompletedCandles, parseFundingEvents } from "../src/lib/sync-logic";
 
@@ -51,6 +52,11 @@ describe("hourly analysis", () => {
     expect(annualizedFundingApy([], 7)).toBeNull();
     expect(annualizedFundingApy([{ ...events[0], funding_rate: -0.001 }], 30)).toBeLessThan(0);
   });
+});
+
+test("heat map ranks negative and positive values while keeping ties and missing data neutral", () => {
+  expect(rankValues([-2, 5, 1, 1, null, Number.NaN])).toEqual([0, 1, 0.5, 0.5, null, null]);
+  expect(rankValues([3, 3])).toEqual([0.5, 0.5]);
 });
 
 describe("sync parsing and catch-up", () => {

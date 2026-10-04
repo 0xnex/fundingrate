@@ -5,9 +5,6 @@ import { Activity, ArrowLeft, ArrowUpRight, Database, RefreshCw } from "lucide-r
 import { useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
-export const RANGES = [7, 30, 90] as const;
-export type RangeDays = typeof RANGES[number];
-
 export function formatPct(value: number | null | undefined, digits = 3) {
   if (value == null || !Number.isFinite(value)) return "—";
   return `${value > 0 ? "+" : ""}${value.toFixed(digits)}%`;
@@ -42,14 +39,14 @@ export function PageFooter() {
   return <footer className="page-footer"><div><Database size={14} /> Binance market data · Stored in Supabase · Calculated in your browser</div><a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">Charts by TradingView <ArrowUpRight size={13} /></a></footer>;
 }
 
-export function RangePicker({ value, onChange }: { value: RangeDays; onChange: (value: RangeDays) => void }) {
-  return <div className="range-picker" aria-label="History window">{RANGES.map((days) => <button key={days} type="button" className={value === days ? "range-active" : ""} onClick={() => onChange(days)}>{days}D</button>)}</div>;
-}
-
 export function BackLink() {
   return <Link href="/" className="back-link"><ArrowLeft size={16} /> Back to overview</Link>;
 }
 
 export function DataMessage({ title, children }: { title: string; children?: ReactNode }) {
   return <div className="data-message"><div className="data-message-icon"><Database size={22} /></div><h2>{title}</h2><p>{children}</p></div>;
+}
+
+export function LoadingIndicator({ label }: { label: string }) {
+  return <div className="loading-indicator" role="status" aria-live="polite"><span className="loading-spinner" aria-hidden="true" /><span>{label}</span></div>;
 }

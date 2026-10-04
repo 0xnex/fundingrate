@@ -62,3 +62,49 @@ export function parseFundingEvents(raw: unknown, nowMs: number): ParsedFunding[]
     }];
   });
 }
+
+export interface ParsedOpenInterest {
+  bucket_start: string;
+  open_interest: number;
+  open_interest_value: number;
+}
+
+export function parseOpenInterest(raw: unknown, nowHour: number): ParsedOpenInterest[] {
+  if (!Array.isArray(raw)) throw new Error("Binance open interest response is not an array");
+  return raw.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) throw new Error("Malformed Binance open interest");
+    const row = entry as Record<string, unknown>;
+    const timestamp = Number(row.timestamp);
+    const openInterest = Number(row.sumOpenInterest);
+    const value = Number(row.sumOpenInterestValue);
+    if (!(Number.isFinite(timestamp) && timestamp > 0 && openInterest >= 0 && value >= 0 && Number.isFinite(openInterest) && Number.isFinite(value))) {
+      throw new Error("Invalid Binance open interest value");
+    }
+    const bucket = Math.floor((timestamp - 1) / HOUR_MS) * HOUR_MS;
+    if (bucket + HOUR_MS > nowHour) return [];
+    return [{ bucket_start: new Date(bucket).toISOString(), open_interest: openInterest, open_interest_value: value }];
+  });
+}
+
+export async function importOpenInterest(
+  firstBucket: number,
+  nowHour: number,
+  fetchPage: (startTime: number, endTime: number) => Promise<unknown>,
+  saveRows: (rows: ParsedOpenInterest[]) => Promise<void>,
+): Promise<number> {
+  // Binance timestamps each OI sample at the end of its hour and includes both
+  // time bounds. Keep each requested range at 500 hourly samples at most.
+  let cursor = firstBucket + HOUR_MS;
+  let count = 0;
+  while (cursor <= nowHour) {
+    const pageEnd = Math.min(nowHour, cursor + 499 * HOUR_MS);
+    const raw = await fetchPage(cursor, pageEnd);
+    const rows = parseOpenInterest(raw, nowHour);
+    if (rows.length) {
+      await saveRows(rows);
+      count += rows.length;
+    }
+    cursor = pageEnd + HOUR_MS;
+  }
+  return count;
+}
